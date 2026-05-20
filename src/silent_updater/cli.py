@@ -140,11 +140,17 @@ def run(
                 token=bb_token,
             )
 
+    click.echo(f"Loading vulnerabilities from {vuln_xlsx}")
     vuln_entries = load_vulnerable_libs(vuln_xlsx)
     if not vuln_entries:
         click.echo("No vulnerable entries found in Excel. Nothing to do.")
         return
+    click.echo(f"  parsed {len(vuln_entries)} vulnerability entries")
+    click.echo(f"Loading compliance config from {compliance_path}")
     compliance = load_compliance(compliance_path)
+    click.echo(f"  strategy={compliance.update_strategy}, "
+               f"exceptions={len(compliance.exceptions)}, "
+               f"pins={len(compliance.version_pins)}")
 
     if workdir:
         wd = Path(workdir).resolve()
@@ -164,6 +170,7 @@ def run(
         click.echo(f"Reusing existing clone at {clone_target}")
 
     if no_llm:
+        click.echo("Starting deterministic agent (--no-llm)...")
         from silent_updater.agent.deterministic import DeterministicUpdaterAgent
         agent = DeterministicUpdaterAgent(
             workdir=clone_target,

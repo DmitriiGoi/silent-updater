@@ -78,19 +78,33 @@ class DeterministicUpdaterAgent(AIAgent):
             date=dt.date.today().strftime("%Y%m%d"),
         )
         report = RunReport(repo_url=self.repo_url, started_at=started)
+        log.info("starting deterministic update run; workdir=%s", self.workdir)
+        log.info("loaded %d vulnerable entries; compliance strategy=%s, max_attempts=%d",
+                 len(self.vuln_entries), self.compliance.update_strategy,
+                 self.compliance.max_attempts_per_dep)
 
         if not self.dry_run:
+            log.info("creating branch %s", branch_name)
             git_ops.create_branch(branch_name, cwd=self.workdir)
+        else:
+            log.info("dry-run: would create branch %s", branch_name)
         report.branch = branch_name
 
         root_pom = pom_inspector.find_root_pom(self.workdir)
+        log.info("root pom: %s", root_pom.relative_to(self.workdir))
 
-        for entry in sorted(self.vuln_entries, key=lambda v: v.severity.rank):
+        sorted_entries = sorted(self.vuln_entries, key=lambda v: v.severity.rank)
+        total = len(sorted_entries)
+        for i, entry in enumerate(sorted_entries, 1):
+            log.info("─── [%d/%d] %s (%s, vuln=%s, cve=%s) ───",
+                     i, total, entry.ga, entry.severity.value,
+                     entry.vuln_version, entry.cve or "no-cve")
             outcome = DepOutcome(entry=entry)
             report.outcomes.append(outcome)
 
             excepted, reason = self.compliance.is_excepted(entry.ga)
             if excepted:
+                log.info("  SKIP: in exceptions (reason: %s)", reason)
                 outcome.final_verdict = "skip"
                 outcome.attempts.append(AttemptLog(
                     ga=entry.ga, from_version=entry.vuln_version, to_version="",
@@ -101,15 +115,24 @@ class DeterministicUpdaterAgent(AIAgent):
                 continue
 
             self._process_vuln(entry, root_pom, outcome)
+            log.info("  outcome: %s%s",
+                     outcome.final_verdict,
+                     f" -> {outcome.final_version} via {outcome.final_strategy}"
+                     if outcome.final_verdict == "success" else "")
 
         any_commits = any(o.final_verdict == "success" for o in report.outcomes)
+        log.info("done: %d updated, %d gave up, %d skipped",
+                 len(report.succeeded), len(report.gave_up), len(report.skipped))
+
         if any_commits and not self.dry_run:
+            log.info("pushing branch %s", branch_name)
             try:
                 git_ops.push_branch(branch_name, cwd=self.workdir)
             except git_ops.GitError as ex:
                 log.warning("push failed: %s", ex)
 
             if self.bitbucket is not None:
+                log.info("opening Bitbucket PR")
                 try:
                     url = bitbucket_ops.create_pull_request(
                         self.bitbucket,
@@ -119,18 +142,25 @@ class DeterministicUpdaterAgent(AIAgent):
                         target_branch=self.compliance.pr_target_branch,
                     )
                     report.pr_url = url
+                    log.info("PR opened: %s", url)
                 except bitbucket_ops.BitbucketError as ex:
                     log.warning("PR creation failed: %s", ex)
 
         report.finished_at = dt.datetime.now().isoformat(timespec="seconds")
-        write_report(report, self.workdir / "update_report.md")
+        report_path = self.workdir / "update_report.md"
+        write_report(report, report_path)
+        log.info("report written: %s", report_path)
         return report
 
     # ---------------- per-dep processing ----------------
 
     def _process_vuln(self, entry: VulnEntry, root_pom: Path, outcome: DepOutcome) -> None:
+        log.info("  running mvn dependency:tree -Dincludes=%s "
+                 "(first call may be slow if Maven plugins are cold)", entry.ga)
         tree = maven_ops.dependency_tree(self.workdir, ga=entry.ga)
-        if not tree.paths_for(entry.ga):
+        paths_for = tree.paths_for(entry.ga)
+        if not paths_for:
+            log.info("  SKIP: %s not in dependency tree", entry.ga)
             outcome.final_verdict = "skip"
             outcome.attempts.append(AttemptLog(
                 ga=entry.ga, from_version=entry.vuln_version, to_version="",
@@ -140,13 +170,24 @@ class DeterministicUpdaterAgent(AIAgent):
             return
 
         is_direct = tree.is_direct(entry.ga)
+        log.info("  found %d path(s) in tree; classification: %s",
+                 len(paths_for), "direct" if is_direct else "transitive")
+        if not is_direct:
+            for p in paths_for[:3]:
+                log.info("    via: %s", " -> ".join(n.ga for n in p.nodes))
         strategies: list[Strategy] = (
             ["bump_direct"] if is_direct
             else ["dm_override", "exclusion_and_direct"]
         )
 
+        log.info("  picking candidate versions (this also runs mvn)")
         candidates = self._pick_target_versions(entry)
         if not candidates:
+            log.info("  GIVE UP: no candidate versions pass compliance filter "
+                     "(strategy=%s, pin=%s, vuln=%s, fixed_hints=%s)",
+                     self.compliance.update_strategy,
+                     self.compliance.pin_for(entry.ga) or "(none)",
+                     entry.vuln_version, list(entry.fixed_versions) or "(none)")
             outcome.final_verdict = "gave_up"
             outcome.attempts.append(AttemptLog(
                 ga=entry.ga, from_version=entry.vuln_version, to_version="",
@@ -155,21 +196,23 @@ class DeterministicUpdaterAgent(AIAgent):
                 note="no candidate versions pass compliance filter",
             ))
             return
+        log.info("  %d candidate version(s): %s", len(candidates), candidates)
+        log.info("  strategy chain: %s", strategies)
 
         budget = self.compliance.max_attempts_per_dep
         attempts_used = 0
         # Parent dep — only needed for exclusion_and_direct strategy
         parent_ga: str | None = None
         if not is_direct:
-            paths = tree.paths_for(entry.ga)
-            if paths and paths[0].root_dep is not None:
-                parent_ga = paths[0].root_dep.ga
+            if paths_for and paths_for[0].root_dep is not None:
+                parent_ga = paths_for[0].root_dep.ga
 
         for strategy in strategies:
             if strategy == "exclusion_and_direct" and parent_ga is None:
                 continue
             for target_version in candidates:
                 if attempts_used >= budget:
+                    log.info("  GIVE UP: max_attempts_per_dep (%d) exhausted", budget)
                     outcome.final_verdict = "gave_up"
                     outcome.attempts.append(AttemptLog(
                         ga=entry.ga, from_version=entry.vuln_version,
@@ -181,6 +224,8 @@ class DeterministicUpdaterAgent(AIAgent):
                     return
 
                 attempts_used += 1
+                log.info("  attempt %d/%d: %s -> %s",
+                         attempts_used, budget, strategy, target_version)
                 attempt = self._try_apply(
                     entry, root_pom, strategy, target_version, parent_ga,
                 )
@@ -212,6 +257,7 @@ class DeterministicUpdaterAgent(AIAgent):
 
         applied_paths = [str(root_pom.relative_to(self.workdir)).replace("\\", "/")]
         try:
+            log.info("    applying %s on %s", strategy, applied_paths[0])
             if strategy == "bump_direct":
                 maven_ops.bump_direct_version(self.workdir, entry.ga, target_version)
             elif strategy == "dm_override":
@@ -240,10 +286,16 @@ class DeterministicUpdaterAgent(AIAgent):
                 verdict="retry", note=f"apply error: {type(ex).__name__}",
             )
 
+        log.info("    running pipeline: %s (timeout %ds)",
+                 self.pipeline_cmd, self.pipeline_timeout)
         pipeline = pipeline_ops.run_pipeline(
             self.pipeline_cmd, cwd=self.workdir, timeout=self.pipeline_timeout,
         )
+        log.info("    pipeline finished: exit=%d, %.1fs, log=%s",
+                 pipeline.exit_code, pipeline.duration_seconds,
+                 pipeline.full_log_path)
         if pipeline.exit_code != 0:
+            log.info("    RETRY: pipeline failed; rolling back %s", applied_paths)
             self._rollback(applied_paths)
             return AttemptLog(
                 ga=entry.ga, from_version=entry.vuln_version,
@@ -254,10 +306,15 @@ class DeterministicUpdaterAgent(AIAgent):
                 note=f"pipeline failed (timed_out={pipeline.timed_out})",
             )
 
+        log.info("    verifying vuln resolved via mvn dependency:tree")
         verify = maven_ops.verify_vuln_resolved(
             self.workdir, entry.ga, entry.vuln_version,
         )
+        log.info("    verify result: resolved=%s, current=%s, note=%s",
+                 verify.get("resolved"), verify.get("current_version"),
+                 verify.get("note", ""))
         if not verify.get("resolved"):
+            log.info("    RETRY: vuln still in tree; rolling back")
             self._rollback(applied_paths)
             return AttemptLog(
                 ga=entry.ga, from_version=entry.vuln_version,
@@ -270,6 +327,7 @@ class DeterministicUpdaterAgent(AIAgent):
         message = self._commit_message(entry, target_version, strategy)
         git_ops.add(applied_paths, cwd=self.workdir)
         sha = git_ops.commit(message, cwd=self.workdir)
+        log.info("    SUCCESS: commit %s", sha[:8])
         return AttemptLog(
             ga=entry.ga, from_version=entry.vuln_version,
             to_version=target_version, strategy=strategy,
