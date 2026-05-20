@@ -45,7 +45,7 @@ python3 -m silent_updater.cli run \
 ```bash
 python3 -m silent_updater.cli run \
     --repo-url "file:///Users/you/IdeaProjects/your-java-project" \
-    --quick-pipeline-cmd "mvn -q -DskipTests compile" \
+    --quick-pipeline-cmd "mvn -q test-compile" \
     --pipeline-cmd "mvn clean verify -DskipITs" \
     --compliance ./examples/compliance_config.json \
     --vuln-xlsx ./my_vulns.xlsx \
@@ -53,7 +53,7 @@ python3 -m silent_updater.cli run \
     --no-llm
 ```
 
-Each attempt now goes: `quick → if fail rollback else full → verify → commit`. Most version-breakers die in the 30-second quick stage so you don't pay for a 10-minute full test run on them.
+`mvn -q test-compile` compiles both `src/main` and `src/test` sources (catches bump-breaks-test-imports cases) but does not run tests — that's the next lifecycle phase. Use `mvn -q compile` if you don't care about test compilation. Each attempt now goes: `quick → if fail rollback else full → verify → commit`. Most version-breakers die in the 30-second quick stage so you don't pay for a 10-minute full test run on them.
 
 First run **always** with `--dry-run` — it shows the plan without modifying anything. Once happy, drop the flag:
 
