@@ -90,6 +90,9 @@ def set_bitbucket_token(token: str) -> None:
               help="HTTP(S) proxy URL for GitHub calls only. "
                    "Falls back to SILENT_UPDATER_PROXY env. Bitbucket is NOT proxied.")
 @click.option("--branch", default=None, help="Existing branch to clone (default: repo HEAD).")
+@click.option("--no-llm", is_flag=True,
+              help="Run the deterministic Python pipeline instead of the LLM-driven "
+                   "agent. Does not need GitHub auth, proxy, or any external network.")
 def run(
     repo_url: str,
     pipeline_cmd: str,
@@ -106,16 +109,19 @@ def run(
     client_id: str,
     proxy: str,
     branch: str | None,
+    no_llm: bool,
 ) -> None:
     """Clone, update vulnerable deps, push PR."""
     store = default_store()
-    if not client_id:
-        click.echo("ERROR: --client-id required (or env SILENT_UPDATER_GH_CLIENT_ID).",
-                   err=True)
-        sys.exit(2)
-    token = github_device_flow.get_or_login(
-        client_id=client_id, store=store, proxy=proxy or None,
-    )
+    token: str | None = None
+    if not no_llm:
+        if not client_id:
+            click.echo("ERROR: --client-id required (or env SILENT_UPDATER_GH_CLIENT_ID). "
+                       "Use --no-llm to skip GitHub auth entirely.", err=True)
+            sys.exit(2)
+        token = github_device_flow.get_or_login(
+            client_id=client_id, store=store, proxy=proxy or None,
+        )
 
     bitbucket: BitbucketCoords | None = None
     if bitbucket_base and project_key and repo_slug:
@@ -153,6 +159,23 @@ def run(
     else:
         click.echo(f"Reusing existing clone at {clone_target}")
 
+    if no_llm:
+        from silent_updater.agent.deterministic import DeterministicUpdaterAgent
+        agent = DeterministicUpdaterAgent(
+            workdir=clone_target,
+            repo_url=repo_url,
+            pipeline_cmd=pipeline_cmd,
+            pipeline_timeout=pipeline_timeout,
+            vuln_entries=vuln_entries,
+            compliance=compliance,
+            bitbucket=bitbucket,
+            dry_run=dry_run,
+        )
+        report = agent.run()
+        _print_summary(clone_target, report)
+        return
+
+    assert token is not None
     llm = GitHubModelsClient(token=token, model=model, proxy=proxy or None)
     transcript = clone_target / "run.log.jsonl"
 
@@ -175,6 +198,10 @@ def run(
     finally:
         llm.close()
 
+    _print_summary(clone_target, report)
+
+
+def _print_summary(clone_target: Path, report) -> None:
     click.echo("")
     click.echo(f"Updated: {len(report.succeeded)}")
     click.echo(f"Gave up: {len(report.gave_up)}")
