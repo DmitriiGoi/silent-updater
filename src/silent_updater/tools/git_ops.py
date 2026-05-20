@@ -20,17 +20,24 @@ class GitResult:
     returncode: int
 
 
-def _run(args: list[str], cwd: Path | str | None = None, timeout: int = 300) -> GitResult:
+def _run(args: list[str], cwd: Path | str | None = None, timeout: int = 300,
+         stream_stderr: bool = False) -> GitResult:
+    """Run git. If stream_stderr=True, git's stderr goes straight to the
+    terminal (used for `clone --progress` so the user sees live progress
+    instead of waiting silently for several minutes).
+    """
     proc = subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None if stream_stderr else subprocess.PIPE,
         text=True,
         timeout=timeout,
     )
+    stderr = "" if stream_stderr else (proc.stderr or "")
     if proc.returncode != 0:
-        raise GitError(args, proc.returncode, proc.stderr.strip())
-    return GitResult(stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode)
+        raise GitError(args, proc.returncode, stderr.strip())
+    return GitResult(stdout=proc.stdout or "", stderr=stderr, returncode=proc.returncode)
 
 
 def clone(repo_url: str, target_dir: Path | str, depth: int | None = None,
@@ -41,7 +48,7 @@ def clone(repo_url: str, target_dir: Path | str, depth: int | None = None,
       - For network URLs (http/https/ssh/git), shallow=True adds
         --depth 1 --no-tags --single-branch for a much faster clone.
     """
-    args = ["clone"]
+    args = ["clone", "--progress", "--verbose"]
     source = repo_url
     is_local = False
     if repo_url.startswith("file://"):
@@ -60,7 +67,8 @@ def clone(repo_url: str, target_dir: Path | str, depth: int | None = None,
     if branch:
         args += ["--branch", branch]
     args += [source, str(target_dir)]
-    _run(args)
+    # Stream stderr so the user sees live progress instead of waiting silently.
+    _run(args, stream_stderr=True)
     return Path(target_dir)
 
 
