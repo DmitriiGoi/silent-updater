@@ -48,7 +48,7 @@ def clone(repo_url: str, target_dir: Path | str, depth: int | None = None,
       - For network URLs (http/https/ssh/git), shallow=True adds
         --depth 1 --no-tags --single-branch for a much faster clone.
     """
-    args = ["clone", "--progress", "--verbose"]
+    args = ["clone"]
     source = repo_url
     is_local = False
     if repo_url.startswith("file://"):
