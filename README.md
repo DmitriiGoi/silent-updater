@@ -1,31 +1,85 @@
 # silent-updater
 
-LLM-driven autonomous agent for updating vulnerable Java/Maven dependencies in repositories hosted on **Bitbucket Server / Data Center**.
+Autonomous agent for updating vulnerable Java/Maven dependencies in repositories hosted on **Bitbucket Server / Data Center**.
 
-The agent reads a list of vulnerable libraries from Excel, clones the target repo, and iteratively figures out a safe target version for each vulnerability — trying direct bumps, BOM updates, `dependencyManagement` overrides, and exclusion strategies until the regression pipeline passes and the vulnerability is gone from `mvn dependency:tree`.
+The agent reads a list of vulnerable libraries from Excel, opens (or clones) the target repo, and iteratively figures out a safe target version for each vulnerability — trying direct bumps, `dependencyManagement` overrides, and exclusion strategies until the regression pipeline passes and the vulnerability is gone from `mvn dependency:tree`.
 
 Most CVEs in real Java projects live in *transitive* dependencies — the agent is built around that fact.
 
-## How it works
+Two modes:
 
-1. CLI clones the Bitbucket repo into an isolated working directory.
-2. The agent authenticates to **GitHub Models API** (`models.github.ai`, OpenAI-compatible) using a GitHub OAuth device-flow token — the same UX as the IntelliJ Copilot plugin (a browser opens, you click "Authorize").
-3. The LLM is given an inventory of tools (`dependency_tree`, `bump_direct_version`, `add_dependency_management_override`, `bump_bom_import`, `add_exclusion_and_direct`, `run_pipeline`, `verify_vuln_resolved`, git ops, Bitbucket PR ops, etc.) and a system prompt with the algorithm.
-4. For each vulnerable dependency the LLM picks a strategy based on the dependency tree, applies it, runs the regression pipeline, verifies the vulnerable version is no longer in the tree, and either commits or rolls back and tries again. Hard cap on attempts per dep.
-5. After all deps are processed, the agent pushes the branch and opens a Bitbucket PR.
-6. An `update_report.md` is written into the workdir with everything that succeeded, failed, or was skipped.
+- **`--no-llm` (default recommended for corp use)** — deterministic Python algorithm. No external LLM, no GitHub auth, no proxy needed. **This is the "safe" mode.**
+- **LLM-driven** — uses GitHub Models API (`models.github.ai`) via OAuth device flow. Has more flexibility on strategy choice but sends pom contents to an external LLM service. **Read the policy notes below before using.**
+
+---
+
+## Install
+
+```bash
+python3 -m pip install -e ".[dev]"
+```
+
+You need: Python 3.11+, `mvn` on PATH, `git` on PATH.
+
+If `silent-updater` command isn't found after install (Mac/Linux PATH issue), use the module form everywhere: `python3 -m silent_updater.cli ...`.
+
+---
+
+## Quickstart — deterministic mode (no LLM, no network)
+
+Copy-paste, swap the paths, hit run:
+
+```bash
+python3 -m silent_updater.cli run \
+    --repo-url "file:///Users/you/IdeaProjects/your-java-project" \
+    --pipeline-cmd "mvn clean test" \
+    --compliance ./examples/compliance_config.json \
+    --vuln-xlsx ./examples/vulnerable_libs.xlsx \
+    --workdir /tmp/silent-work \
+    --no-llm \
+    --dry-run
+```
+
+First run **always** with `--dry-run` — it shows the plan without modifying anything. Once happy, drop the flag:
+
+```bash
+python3 -m silent_updater.cli run \
+    --repo-url "file:///Users/you/IdeaProjects/your-java-project" \
+    --pipeline-cmd "mvn clean test" \
+    --compliance ./examples/compliance_config.json \
+    --vuln-xlsx ./my_vulns.xlsx \
+    --workdir /tmp/silent-work \
+    --no-llm
+```
+
+What you get:
+
+- In `/tmp/silent-work/<repo-name>/` — a clone with a new branch (`deps/silent-update-YYYYMMDD`) and one commit per successful update.
+- `update_report.md` in the same directory — what got updated, what was skipped, what we gave up on.
+- The branch is **not pushed** unless you also pass `--bitbucket-base/--project-key/--repo-slug` and have a Bitbucket PAT stored.
+
+### With Bitbucket PR creation
+
+```bash
+# One-time: store your Bitbucket Server HTTP Access Token
+python3 -m silent_updater.cli set-bitbucket-token <YOUR_PAT>
+
+# Then in your run, add:
+#   --bitbucket-base https://bitbucket.your-bank.local \
+#   --project-key PROJ --repo-slug your-repo
+```
+
+---
 
 ## Inputs
 
 ### `vulnerable_libs.xlsx`
 
-A spreadsheet with the columns:
-
 | groupId | artifactId | vulnerableVersion | cve | severity | notes |
 |---|---|---|---|---|---|
 | org.apache.logging.log4j | log4j-core | 2.14.1 | CVE-2021-44228 | CRITICAL | log4shell |
 
-Only `groupId`, `artifactId`, `vulnerableVersion` are required. The agent **discovers the safe target version by trial and error** — you do not specify it.
+Only `groupId`, `artifactId`, `vulnerableVersion` are required. The agent discovers the safe target version by trial and error — you don't specify it.
 
 ### `compliance_config.json`
 
@@ -40,68 +94,89 @@ Only `groupId`, `artifactId`, `vulnerableVersion` are required. The agent **disc
 }
 ```
 
-`update_strategy` is one of `patch`, `patch_minor`, or `any`.
+`update_strategy`: `patch` | `patch_minor` | `any`.
 
-## Install
+---
 
-```
-python -m pip install -e .[dev]
-```
+## Deterministic algorithm (what `--no-llm` does)
 
-You need: Python 3.11+, `mvn` on PATH, `git` on PATH.
+For each vulnerable dep (sorted by severity):
 
-## Usage
+1. Skip if listed in `compliance.exceptions`.
+2. `mvn dependency:tree` — if the GA is not in the tree, skip ("not affected").
+3. Pick candidate versions: from `mvn versions:display-dependency-updates`, keep those that are strictly greater than the vulnerable version, satisfy `version_pins`, and pass the `update_strategy` filter (patch < minor for `patch_minor` strategy). Sort smallest bump first.
+4. Pick strategy chain by location in the tree:
+   - **Direct dep** → `[bump_direct_version]`
+   - **Transitive dep** → `[add_dependency_management_override, add_exclusion_and_direct]`
+5. For each strategy × candidate version (up to `max_attempts_per_dep`):
+   - Apply via Maven/lxml. Run the regression pipeline. Verify the vulnerable version is no longer in `dependency:tree`.
+   - On success: `git commit`, move on to the next vulnerability.
+   - On pipeline fail OR vuln still present: `git checkout HEAD -- <pom>` to roll back the file, log the attempt, try the next candidate.
+6. After all vulns: push the branch (if commits exist) and open a Bitbucket PR (if coordinates+PAT provided).
 
-```
-# One-time GitHub auth (opens browser)
-silent-updater login --client-id <YOUR_GH_OAUTH_APP_CLIENT_ID>
+---
 
-# Store Bitbucket Personal Access Token (HTTP Access Token)
-silent-updater set-bitbucket-token <PAT>
+## LLM-driven mode
 
-# Run an update against a repo
-silent-updater run \
-    --repo-url ssh://git@bitbucket.example.com/proj/app.git \
+Use this only if you have explicit InfoSec sign-off to send pom.xml content to an external LLM.
+
+```bash
+# One-time GitHub OAuth via device flow (browser opens)
+python3 -m silent_updater.cli login --client-id <YOUR_GH_OAUTH_APP_CLIENT_ID>
+
+# Run with LLM orchestration
+python3 -m silent_updater.cli run \
+    --repo-url "file:///path/to/repo" \
     --pipeline-cmd "mvn clean verify -DskipITs" \
     --compliance ./examples/compliance_config.json \
-    --vuln-xlsx ./examples/vulnerable_libs.xlsx \
-    --bitbucket-base https://bitbucket.example.com \
-    --project-key PROJ --repo-slug app \
+    --vuln-xlsx ./my_vulns.xlsx \
     --model gpt-4o
 ```
 
-Add `--dry-run` to plan only — the LLM still runs but tools return "would do X" rather than executing.
+For corporate proxy (Basic auth):
+```bash
+export SILENT_UPDATER_PROXY="http://USER:PASS@user-proxy.host:port"
+python3 -m silent_updater.cli login
+```
 
-Set `SILENT_UPDATER_GH_CLIENT_ID` in your environment to avoid passing `--client-id` every time.
+For SPNEGO/Kerberos proxies (common in banks), see `docs/proxy.md` for setting up a local `px-proxy` bridge.
+
+> **Important policy note**: GitHub Models is a separate product from GitHub Copilot. Sending repository contents to `models.github.ai` is NOT covered by your bank's Copilot DPA. Don't run this mode on corporate code without an explicit approval from InfoSec.
+
+---
 
 ## Layout
 
 ```
 src/silent_updater/
-├── auth/                  # GitHub device-flow OAuth
+├── auth/                  # GitHub device-flow OAuth (LLM mode only)
 ├── llm/                   # GitHub Models client + generic tool-use loop
-├── agent/                 # AIAgent base + DependencyUpdaterAgent + system prompt
+├── agent/
+│   ├── base.py            # AIAgent ABC
+│   ├── dependency_updater.py  # LLM-driven orchestrator
+│   └── deterministic.py   # No-LLM Python orchestrator
 ├── tools/                 # maven_ops, git_ops, pipeline_ops, bitbucket_ops, pom_inspector
 ├── inputs/                # Excel + compliance JSON loaders
+├── semver.py              # Maven-tolerant version parser + filters
 ├── models.py              # dataclasses
 ├── reporter.py            # update_report.md
 └── cli.py
 ```
 
+---
+
 ## Tests
 
+```bash
+python3 -m pytest -q
 ```
-python -m pytest
-```
 
-Unit tests cover Excel/compliance parsing, `dependency:tree` parsing, XML editing strategies (`add_dependency_management_override`, `bump_bom_import`, `add_exclusion_and_direct`), the OAuth device flow (HTTP mocked), the Bitbucket PR client (HTTP mocked), the generic tool-use loop, the reporter, and git operations (against a real local bare repo).
+Coverage:
 
-E2E tests drive the agent end-to-end with a scripted FakeLLM and a real local git repo + mocked Maven layer:
+- Unit: Excel/compliance parsing, `dependency:tree` parser, XML editing strategies, OAuth device flow (HTTP mocked), Bitbucket PR client (HTTP mocked), tool-loop, reporter, git ops against a local bare repo, semver helpers.
+- E2E (mocked Maven, real git): direct dep, transitive via BOM, transitive needing dm_override after a failed direct bump, retry on pipeline failure — for both the LLM and deterministic agents.
 
-- `test_agent_direct_dep.py` — direct dependency bump.
-- `test_agent_transitive_via_bom.py` — vulnerable dep brought in by a BOM import; strategy is `bump_bom_import`.
-- `test_agent_transitive_dm_override.py` — multiple paths to the vulnerability; first `bump_direct_version` doesn't displace it; agent falls back to `add_dependency_management_override`.
-- `test_agent_retry_on_failure.py` — first version choice breaks the build; agent reads stderr and tries a smaller bump.
+---
 
 ## Out of scope (for now)
 
