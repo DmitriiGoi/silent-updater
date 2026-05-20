@@ -71,6 +71,9 @@ class DeterministicUpdaterAgent(AIAgent):
         self.compliance = compliance
         self.bitbucket = bitbucket
         self.dry_run = dry_run
+        # Caches populated once at run() start so we don't invoke Maven per vuln.
+        self._tree: "maven_ops.TreeAnalysis | None" = None
+        self._all_updates: dict[str, str] = {}
 
     def run(self) -> RunReport:
         started = dt.datetime.now().isoformat(timespec="seconds")
@@ -92,6 +95,18 @@ class DeterministicUpdaterAgent(AIAgent):
 
         root_pom = pom_inspector.find_root_pom(self.workdir)
         log.info("root pom: %s", root_pom.relative_to(self.workdir))
+
+        # ── Upfront discovery: one mvn call each, then in-memory lookups ──
+        log.info("[discovery 1/2] running full mvn dependency:tree once "
+                 "(replaces N per-vuln calls)")
+        self._tree = maven_ops.full_dependency_tree(self.workdir)
+        log.info("[discovery 1/2] tree has %d artifact paths", len(self._tree.paths))
+
+        log.info("[discovery 2/2] running mvn versions:display-dependency-updates "
+                 "once (for declared deps; transitive vulns rely on Veracode hints)")
+        self._all_updates = maven_ops.all_available_updates(self.workdir)
+        log.info("[discovery 2/2] %d declared deps have available updates",
+                 len(self._all_updates))
 
         sorted_entries = sorted(self.vuln_entries, key=lambda v: v.severity.rank)
         total = len(sorted_entries)
@@ -155,10 +170,8 @@ class DeterministicUpdaterAgent(AIAgent):
     # ---------------- per-dep processing ----------------
 
     def _process_vuln(self, entry: VulnEntry, root_pom: Path, outcome: DepOutcome) -> None:
-        log.info("  running mvn dependency:tree -Dincludes=%s "
-                 "(first call may be slow if Maven plugins are cold)", entry.ga)
-        tree = maven_ops.dependency_tree(self.workdir, ga=entry.ga)
-        paths_for = tree.paths_for(entry.ga)
+        assert self._tree is not None
+        paths_for = self._tree.paths_for(entry.ga)
         if not paths_for:
             log.info("  SKIP: %s not in dependency tree", entry.ga)
             outcome.final_verdict = "skip"
@@ -169,7 +182,7 @@ class DeterministicUpdaterAgent(AIAgent):
             ))
             return
 
-        is_direct = tree.is_direct(entry.ga)
+        is_direct = self._tree.is_direct(entry.ga)
         log.info("  found %d path(s) in tree; classification: %s",
                  len(paths_for), "direct" if is_direct else "transitive")
         if not is_direct:
@@ -180,7 +193,7 @@ class DeterministicUpdaterAgent(AIAgent):
             else ["dm_override", "exclusion_and_direct"]
         )
 
-        log.info("  picking candidate versions (this also runs mvn)")
+        log.info("  picking candidate versions (from cache + Veracode hints)")
         candidates = self._pick_target_versions(entry)
         if not candidates:
             log.info("  GIVE UP: no candidate versions pass compliance filter "
@@ -380,17 +393,20 @@ class DeterministicUpdaterAgent(AIAgent):
                 ordered.append(v)
                 seen.add(v)
 
-        available = maven_ops.list_available_versions(self.workdir, entry.ga)
-        for v in sorted([x for x in available if passes_filters(x) and x not in seen],
-                        key=sort_key):
-            ordered.append(v)
-            seen.add(v)
+        # Cached display-dependency-updates result (single-version per GA from
+        # versions-maven-plugin); only useful for direct deps. For transitive
+        # deps the cache is typically empty for this GA and we rely on
+        # entry.fixed_versions above.
+        cached = self._all_updates.get(entry.ga)
+        if cached and passes_filters(cached) and cached not in seen:
+            ordered.append(cached)
+            seen.add(cached)
 
         # Among Veracode hints, also sort by version size so we still try the
         # smallest acceptable bump first.
         from_hints = [v for v in ordered if v in entry.fixed_versions]
-        from_available = [v for v in ordered if v not in entry.fixed_versions]
-        return sorted(from_hints, key=sort_key) + from_available
+        from_cached = [v for v in ordered if v not in entry.fixed_versions]
+        return sorted(from_hints, key=sort_key) + from_cached
 
     def _commit_message(self, entry: VulnEntry, to_version: str, strategy: Strategy) -> str:
         cve = entry.cve or "no-cve"

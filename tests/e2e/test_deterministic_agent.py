@@ -147,7 +147,12 @@ def test_gave_up_when_no_acceptable_versions(maven_repo: Path,
 
 @requires_git
 def test_retries_then_succeeds(maven_repo: Path, maven_state: FakeMavenState) -> None:
-    """Smallest bump compiles but doesn't resolve the vuln; next one works."""
+    """Smallest bump compiles but doesn't resolve the vuln; next one works.
+
+    Multiple candidate versions come from Veracode fixed_versions hints —
+    versions-maven-plugin only reports a single 'latest' per GA, so multi-
+    candidate scenarios in practice come from external CVE-fix metadata.
+    """
     vuln_ga = "org.snakeyaml:snakeyaml"
     maven_state.tree_by_ga[vuln_ga] = TreeAnalysis(paths=[
         TreePath(nodes=(
@@ -156,7 +161,6 @@ def test_retries_then_succeeds(maven_repo: Path, maven_state: FakeMavenState) ->
             TreeNode(*vuln_ga.split(":"), type="jar", version="1.30", scope="compile", depth=2),
         )),
     ])
-    maven_state.available_versions[vuln_ga] = ["1.31", "1.33"]
     # First verify: not resolved. Second: resolved.
     maven_state.verify_by_ga[vuln_ga] = [
         {"resolved": False, "current_version": "1.30", "note": "still in tree"},
@@ -167,7 +171,8 @@ def test_retries_then_succeeds(maven_repo: Path, maven_state: FakeMavenState) ->
     agent = _make_agent(
         maven_repo,
         [VulnEntry(*vuln_ga.split(":"), vuln_version="1.30",
-                   cve="CVE-Y", severity=Severity.HIGH)],
+                   cve="CVE-Y", severity=Severity.HIGH,
+                   fixed_versions=("1.31", "1.33"))],
     )
     report = agent.run()
     assert len(report.succeeded) == 1

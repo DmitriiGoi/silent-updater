@@ -48,7 +48,14 @@ def maven_state(monkeypatch) -> FakeMavenState:
             return state.tree_by_ga[ga]
         if None in state.tree_by_ga:
             return state.tree_by_ga[None]
-        return TreeAnalysis(paths=[])
+        # Build a "full" tree from all per-ga entries when None wasn't set.
+        all_paths = []
+        for paths in state.tree_by_ga.values():
+            all_paths.extend(paths.paths)
+        return TreeAnalysis(paths=all_paths)
+
+    def fake_full_tree(workdir):
+        return fake_tree(workdir, ga=None)
 
     def fake_effective_version(workdir, ga):
         tree = fake_tree(workdir, ga=ga)
@@ -57,6 +64,10 @@ def maven_state(monkeypatch) -> FakeMavenState:
 
     def fake_available(workdir, ga):
         return state.available_versions.get(ga, [])
+
+    def fake_all_updates(workdir):
+        # Aggregate latest version per GA from state.available_versions.
+        return {ga: vs[0] for ga, vs in state.available_versions.items() if vs}
 
     def fake_probe(workdir, ga, version):
         return version in state.available_versions.get(ga, [])
@@ -90,8 +101,10 @@ def maven_state(monkeypatch) -> FakeMavenState:
         return state.pop_pipeline()
 
     monkeypatch.setattr(maven_ops, "dependency_tree", fake_tree)
+    monkeypatch.setattr(maven_ops, "full_dependency_tree", fake_full_tree)
     monkeypatch.setattr(maven_ops, "effective_version", fake_effective_version)
     monkeypatch.setattr(maven_ops, "list_available_versions", fake_available)
+    monkeypatch.setattr(maven_ops, "all_available_updates", fake_all_updates)
     monkeypatch.setattr(maven_ops, "probe_version_exists", fake_probe)
     monkeypatch.setattr(maven_ops, "bump_direct_version", fake_bump_direct)
     monkeypatch.setattr(maven_ops, "bump_managed_version", fake_bump_managed)

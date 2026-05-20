@@ -195,6 +195,24 @@ def dependency_tree(workdir: Path | str, ga: str | None = None) -> TreeAnalysis:
     return parse_dependency_tree(proc.stdout)
 
 
+def full_dependency_tree(workdir: Path | str) -> TreeAnalysis:
+    """One-shot full project tree (no -Dincludes filter).
+
+    Intended to be called ONCE per run and shared across all vuln lookups —
+    a single Maven invocation instead of N (which adds hours on big inputs).
+    """
+    return dependency_tree(workdir, ga=None)
+
+
+def all_available_updates(workdir: Path | str) -> dict[str, str]:
+    """One-shot version-updates dictionary for every declared dep in the pom.
+
+    Wraps `mvn versions:display-dependency-updates` without -Dincludes so we
+    only pay the (slow) plugin run once per agent run.
+    """
+    return display_dependency_updates(workdir, ga=None)
+
+
 # ------------------------------ effective pom -------------------------------
 
 def effective_pom(workdir: Path | str) -> str:
