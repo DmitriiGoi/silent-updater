@@ -28,11 +28,18 @@ class DeviceCodeResponse:
     interval: int
 
 
+def _make_client(proxy: str | None) -> httpx.Client:
+    if proxy:
+        return httpx.Client(timeout=30.0, proxy=proxy)
+    return httpx.Client(timeout=30.0)
+
+
 def request_device_code(client_id: str, scope: str = DEFAULT_SCOPE,
-                        client: httpx.Client | None = None) -> DeviceCodeResponse:
+                        client: httpx.Client | None = None,
+                        proxy: str | None = None) -> DeviceCodeResponse:
     owns = client is None
     if client is None:
-        client = httpx.Client(timeout=30.0)
+        client = _make_client(proxy)
     try:
         resp = client.post(
             DEVICE_CODE_URL,
@@ -61,6 +68,7 @@ def poll_for_token(
     device: DeviceCodeResponse,
     *,
     client: httpx.Client | None = None,
+    proxy: str | None = None,
     now=time.time,
     sleep=time.sleep,
 ) -> str:
@@ -69,7 +77,7 @@ def poll_for_token(
     deadline = now() + device.expires_in
     owns = client is None
     if client is None:
-        client = httpx.Client(timeout=30.0)
+        client = _make_client(proxy)
     try:
         while now() < deadline:
             sleep(interval)
@@ -105,10 +113,11 @@ def poll_for_token(
 
 
 def login(client_id: str, scope: str = DEFAULT_SCOPE,
-          store: TokenStore | None = None, open_browser: bool = True) -> str:
+          store: TokenStore | None = None, open_browser: bool = True,
+          proxy: str | None = None) -> str:
     """Interactive: print code, open browser, poll. Save token. Return token."""
     store = store or default_store()
-    device = request_device_code(client_id=client_id, scope=scope)
+    device = request_device_code(client_id=client_id, scope=scope, proxy=proxy)
     print(f"\nOpen {device.verification_uri} and enter code: {device.user_code}")
     print(f"(this code expires in {device.expires_in}s)\n")
     if open_browser:
@@ -116,18 +125,19 @@ def login(client_id: str, scope: str = DEFAULT_SCOPE,
             webbrowser.open(device.verification_uri)
         except Exception:
             pass
-    token = poll_for_token(client_id, device)
+    token = poll_for_token(client_id, device, proxy=proxy)
     store.save(GH_KEY, token)
     return token
 
 
 def get_or_login(client_id: str, scope: str = DEFAULT_SCOPE,
-                 store: TokenStore | None = None) -> str:
+                 store: TokenStore | None = None,
+                 proxy: str | None = None) -> str:
     store = store or default_store()
     existing = store.load(GH_KEY)
     if existing:
         return existing
-    return login(client_id=client_id, scope=scope, store=store)
+    return login(client_id=client_id, scope=scope, store=store, proxy=proxy)
 
 
 def logout(store: TokenStore | None = None) -> None:

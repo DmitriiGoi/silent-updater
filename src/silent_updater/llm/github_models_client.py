@@ -37,11 +37,18 @@ class GitHubModelsClient:
         endpoint: str = GITHUB_MODELS_URL,
         http: httpx.Client | None = None,
         timeout: float = 120.0,
+        proxy: str | None = None,
     ):
         self.token = token
         self.model = model
         self.endpoint = endpoint
-        self.http = http or httpx.Client(timeout=timeout)
+        if http is None:
+            kwargs: dict[str, Any] = {"timeout": timeout}
+            if proxy:
+                kwargs["proxy"] = proxy
+            self.http = httpx.Client(**kwargs)
+        else:
+            self.http = http
         self._owns_http = http is None
 
     def close(self) -> None:

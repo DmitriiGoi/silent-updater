@@ -21,6 +21,8 @@ from silent_updater.tools.bitbucket_ops import BitbucketCoords
 # Public client_id for the OAuth App registered for silent-updater.
 # (User can override via env if they prefer their own OAuth App.)
 DEFAULT_CLIENT_ID = os.environ.get("SILENT_UPDATER_GH_CLIENT_ID", "")
+# App-scoped proxy (overrides ambient http(s)_proxy ONLY for our GitHub calls).
+DEFAULT_PROXY = os.environ.get("SILENT_UPDATER_PROXY", "")
 
 
 @click.group()
@@ -35,13 +37,19 @@ def main(verbose: bool) -> None:
 @main.command()
 @click.option("--client-id", default=DEFAULT_CLIENT_ID,
               help="GitHub OAuth App client_id (or set SILENT_UPDATER_GH_CLIENT_ID).")
-def login(client_id: str) -> None:
+@click.option("--proxy", default=DEFAULT_PROXY,
+              help="HTTP(S) proxy URL for GitHub calls only "
+                   "(e.g. http://USER:PASS@user-proxy.host:port). "
+                   "Falls back to SILENT_UPDATER_PROXY env. "
+                   "Ambient http_proxy/https_proxy are NOT used for our requests "
+                   "unless you set them here.")
+def login(client_id: str, proxy: str) -> None:
     """Authenticate with GitHub via device flow."""
     if not client_id:
         click.echo("ERROR: --client-id required (or set SILENT_UPDATER_GH_CLIENT_ID).",
                    err=True)
         sys.exit(2)
-    token = github_device_flow.login(client_id=client_id)
+    token = github_device_flow.login(client_id=client_id, proxy=proxy or None)
     click.echo(f"Saved GitHub token (len={len(token)}). You can now run `silent-updater run`.")
 
 
@@ -78,6 +86,9 @@ def set_bitbucket_token(token: str) -> None:
 @click.option("--pipeline-timeout", default=1800, type=int)
 @click.option("--dry-run", is_flag=True, help="Plan only — do not modify files or git.")
 @click.option("--client-id", default=DEFAULT_CLIENT_ID, help="GitHub OAuth App client_id.")
+@click.option("--proxy", default=DEFAULT_PROXY,
+              help="HTTP(S) proxy URL for GitHub calls only. "
+                   "Falls back to SILENT_UPDATER_PROXY env. Bitbucket is NOT proxied.")
 @click.option("--branch", default=None, help="Existing branch to clone (default: repo HEAD).")
 def run(
     repo_url: str,
@@ -93,6 +104,7 @@ def run(
     pipeline_timeout: int,
     dry_run: bool,
     client_id: str,
+    proxy: str,
     branch: str | None,
 ) -> None:
     """Clone, update vulnerable deps, push PR."""
@@ -101,7 +113,9 @@ def run(
         click.echo("ERROR: --client-id required (or env SILENT_UPDATER_GH_CLIENT_ID).",
                    err=True)
         sys.exit(2)
-    token = github_device_flow.get_or_login(client_id=client_id, store=store)
+    token = github_device_flow.get_or_login(
+        client_id=client_id, store=store, proxy=proxy or None,
+    )
 
     bitbucket: BitbucketCoords | None = None
     if bitbucket_base and project_key and repo_slug:
@@ -139,7 +153,7 @@ def run(
     else:
         click.echo(f"Reusing existing clone at {clone_target}")
 
-    llm = GitHubModelsClient(token=token, model=model)
+    llm = GitHubModelsClient(token=token, model=model, proxy=proxy or None)
     transcript = clone_target / "run.log.jsonl"
 
     agent = DependencyUpdaterAgent(
