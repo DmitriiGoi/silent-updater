@@ -17,6 +17,11 @@ class Severity(str, Enum):
         if not raw:
             return cls.UNKNOWN
         value = raw.strip().upper()
+        # Veracode uses "Very High" which corresponds to CRITICAL.
+        if value in ("VERY HIGH", "VERY-HIGH", "VERYHIGH"):
+            return cls.CRITICAL
+        if value == "INFORMATIONAL":
+            return cls.LOW
         for s in cls:
             if s.value == value:
                 return s
@@ -42,6 +47,7 @@ class VulnEntry:
     cve: str = ""
     severity: Severity = Severity.UNKNOWN
     notes: str = ""
+    fixed_versions: tuple[str, ...] = ()
 
     @property
     def ga(self) -> str:

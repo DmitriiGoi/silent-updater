@@ -16,6 +16,10 @@ class ExcelFormatError(ValueError):
 
 
 def load_vulnerable_libs(xlsx_path: str | Path) -> list[VulnEntry]:
+    """Load vulnerabilities from Excel. Auto-detects the file format:
+    - Veracode export (headers include 'Component name and version' + 'Source Ref')
+    - Standard (headers groupId/artifactId/vulnerableVersion)
+    """
     path = Path(xlsx_path)
     if not path.exists():
         raise FileNotFoundError(f"Excel not found: {path}")
@@ -32,6 +36,12 @@ def load_vulnerable_libs(xlsx_path: str | Path) -> list[VulnEntry]:
         raise ExcelFormatError("Empty sheet")
 
     headers = [_norm_header(h) for h in header_row]
+
+    # Defer to Veracode loader if format matches.
+    from silent_updater.inputs.veracode_loader import is_veracode_format, load_veracode
+    if is_veracode_format(headers):
+        return load_veracode(path)
+
     col_index: dict[str, int] = {}
     for idx, h in enumerate(headers):
         if h:

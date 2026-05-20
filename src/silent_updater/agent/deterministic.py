@@ -284,22 +284,28 @@ class DeterministicUpdaterAgent(AIAgent):
             log.exception("rollback failed for %s", paths)
 
     def _pick_target_versions(self, entry: VulnEntry) -> list[str]:
-        available = maven_ops.list_available_versions(self.workdir, entry.ga)
-        if not available:
-            return []
+        """Pick & order candidate target versions.
 
+        Priority:
+          1. Versions explicitly suggested by the vulnerability source
+             (e.g. Veracode 'Fixed Version' column) — try these first since
+             they're the verified fix.
+          2. Newer versions reported by `mvn versions:display-dependency-updates`.
+
+        All candidates are filtered by compliance (strictly greater than vuln,
+        satisfies pins, passes update_strategy) and sorted smallest-bump-first.
+        """
         pin = self.compliance.pin_for(entry.ga)
         strategy = self.compliance.update_strategy
 
-        filtered: list[str] = []
-        for v in available:
+        def passes_filters(v: str) -> bool:
             if not is_strictly_greater(v, entry.vuln_version):
-                continue
+                return False
             if not satisfies_pin(v, pin):
-                continue
+                return False
             if not allowed_by_strategy(entry.vuln_version, v, strategy):
-                continue
-            filtered.append(v)
+                return False
+            return True
 
         def sort_key(v: str) -> tuple:
             parsed = Version.parse(v)
@@ -307,7 +313,26 @@ class DeterministicUpdaterAgent(AIAgent):
                 return (9, 0, 0)
             return (parsed.major, parsed.minor, parsed.patch)
 
-        return sorted(filtered, key=sort_key)
+        # Sources, in priority order; dedupe preserving first-seen order.
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        for v in entry.fixed_versions:
+            if v not in seen and passes_filters(v):
+                ordered.append(v)
+                seen.add(v)
+
+        available = maven_ops.list_available_versions(self.workdir, entry.ga)
+        for v in sorted([x for x in available if passes_filters(x) and x not in seen],
+                        key=sort_key):
+            ordered.append(v)
+            seen.add(v)
+
+        # Among Veracode hints, also sort by version size so we still try the
+        # smallest acceptable bump first.
+        from_hints = [v for v in ordered if v in entry.fixed_versions]
+        from_available = [v for v in ordered if v not in entry.fixed_versions]
+        return sorted(from_hints, key=sort_key) + from_available
 
     def _commit_message(self, entry: VulnEntry, to_version: str, strategy: Strategy) -> str:
         cve = entry.cve or "no-cve"

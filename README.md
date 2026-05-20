@@ -75,11 +75,21 @@ python3 -m silent_updater.cli set-bitbucket-token <YOUR_PAT>
 
 ### `vulnerable_libs.xlsx`
 
+The format is auto-detected by header names. Two layouts are supported:
+
+**Standard format:**
+
 | groupId | artifactId | vulnerableVersion | cve | severity | notes |
 |---|---|---|---|---|---|
 | org.apache.logging.log4j | log4j-core | 2.14.1 | CVE-2021-44228 | CRITICAL | log4shell |
 
-Only `groupId`, `artifactId`, `vulnerableVersion` are required. The agent discovers the safe target version by trial and error — you don't specify it.
+Only `groupId`, `artifactId`, `vulnerableVersion` are required.
+
+**Veracode export:**
+
+Drop in the Excel report as-is. Required columns: `Component name and version` (GAV like `org.foo:bar:1.2.3`) and `Source Ref` (the CVE). Recognised optional columns: `Version`, `Overall Severity` (incl. "Very High" → CRITICAL), `CVE Summary`, `Fixed Version`. Multiple rows for the same `(GA, version)` are merged automatically — CVEs are concatenated, severities collapse to the highest, fixed versions are unioned.
+
+The agent uses `Fixed Version` (if present) as the **first** candidate target, then falls back to `mvn versions:display-dependency-updates`. Veracode's messy `5.19.3, 5.19.3 ? Version ? 5.19.3, 6.2.2 ? Version ? 6.2.2` is parsed by extracting version-shaped tokens.
 
 ### `compliance_config.json`
 
