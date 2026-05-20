@@ -1,0 +1,12 @@
+{
+  "update_strategy": "patch_minor",
+  "exceptions": [
+    {"ga": "org.example:legacy-lib", "reason": "blocked by manual migration tracked in JIRA-1234"}
+  ],
+  "version_pins": {
+    "org.springframework:spring-core": "<6.0.0"
+  },
+  "max_attempts_per_dep": 5,
+  "branch_template": "deps/silent-update-{date}",
+  "pr_target_branch": "main"
+}
