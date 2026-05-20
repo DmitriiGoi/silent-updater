@@ -154,7 +154,11 @@ def run(
 
     clone_target = wd / _repo_dir_name(repo_url)
     if not clone_target.exists():
-        click.echo(f"Cloning {repo_url} → {clone_target}")
+        is_local = repo_url.startswith("file://") or (
+            "://" not in repo_url and not repo_url.startswith("git@")
+        )
+        mode = "local --local (hardlink)" if is_local else "shallow --depth 1"
+        click.echo(f"Cloning {repo_url} → {clone_target}  [{mode}]")
         git_ops.clone(repo_url, clone_target, branch=branch)
     else:
         click.echo(f"Reusing existing clone at {clone_target}")

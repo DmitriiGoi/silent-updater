@@ -34,13 +34,32 @@ def _run(args: list[str], cwd: Path | str | None = None, timeout: int = 300) -> 
 
 
 def clone(repo_url: str, target_dir: Path | str, depth: int | None = None,
-          branch: str | None = None) -> Path:
+          branch: str | None = None, shallow: bool = True) -> Path:
+    """Clone repo. Fast-path:
+      - file:// URLs (and bare local paths) are passed as raw paths so git can
+        use its hardlink-based --local optimization (instant for big repos).
+      - For network URLs (http/https/ssh/git), shallow=True adds
+        --depth 1 --no-tags --single-branch for a much faster clone.
+    """
     args = ["clone"]
-    if depth is not None:
+    source = repo_url
+    is_local = False
+    if repo_url.startswith("file://"):
+        source = repo_url[len("file://"):]
+        is_local = True
+    elif "://" not in repo_url and not repo_url.startswith("git@"):
+        # raw filesystem path
+        is_local = True
+
+    if is_local:
+        args.append("--local")
+    elif shallow and depth is None:
+        args += ["--depth", "1", "--no-tags", "--single-branch"]
+    elif depth is not None:
         args += ["--depth", str(depth)]
     if branch:
         args += ["--branch", branch]
-    args += [repo_url, str(target_dir)]
+    args += [source, str(target_dir)]
     _run(args)
     return Path(target_dir)
 
