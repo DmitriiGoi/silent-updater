@@ -84,6 +84,14 @@ def set_bitbucket_token(token: str) -> None:
 @click.option("--model", default="gpt-4o", help="Model id from GitHub Models catalog.")
 @click.option("--max-iterations", default=100, type=int)
 @click.option("--pipeline-timeout", default=1800, type=int)
+@click.option("--quick-pipeline-cmd", default=None,
+              help="Optional fast pre-flight command (e.g. 'mvn -q -DskipTests "
+                   "compile') run BEFORE --pipeline-cmd on every attempt. "
+                   "If this fails, the attempt is rolled back without running "
+                   "the full pipeline. Massively speeds up batches by failing "
+                   "compile-breakers in seconds instead of after full tests.")
+@click.option("--quick-pipeline-timeout", default=300, type=int,
+              help="Timeout for --quick-pipeline-cmd (default 5 min).")
 @click.option("--dry-run", is_flag=True, help="Plan only — do not modify files or git.")
 @click.option("--client-id", default=DEFAULT_CLIENT_ID, help="GitHub OAuth App client_id.")
 @click.option("--proxy", default=DEFAULT_PROXY,
@@ -105,6 +113,8 @@ def run(
     model: str,
     max_iterations: int,
     pipeline_timeout: int,
+    quick_pipeline_cmd: str | None,
+    quick_pipeline_timeout: int,
     dry_run: bool,
     client_id: str,
     proxy: str,
@@ -171,6 +181,9 @@ def run(
 
     if no_llm:
         click.echo("Starting deterministic agent (--no-llm)...")
+        if quick_pipeline_cmd:
+            click.echo(f"  two-stage pipeline enabled: quick='{quick_pipeline_cmd}', "
+                       f"full='{pipeline_cmd}'")
         from silent_updater.agent.deterministic import DeterministicUpdaterAgent
         agent = DeterministicUpdaterAgent(
             workdir=clone_target,
@@ -181,6 +194,8 @@ def run(
             compliance=compliance,
             bitbucket=bitbucket,
             dry_run=dry_run,
+            quick_pipeline_cmd=quick_pipeline_cmd,
+            quick_pipeline_timeout=quick_pipeline_timeout,
         )
         report = agent.run()
         _print_summary(clone_target, report)

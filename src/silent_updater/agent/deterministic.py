@@ -62,6 +62,8 @@ class DeterministicUpdaterAgent(AIAgent):
         compliance: ComplianceConfig,
         bitbucket: BitbucketCoords | None,
         dry_run: bool = False,
+        quick_pipeline_cmd: str | None = None,
+        quick_pipeline_timeout: int = 300,
     ):
         super().__init__(workdir)
         self.repo_url = repo_url
@@ -71,6 +73,8 @@ class DeterministicUpdaterAgent(AIAgent):
         self.compliance = compliance
         self.bitbucket = bitbucket
         self.dry_run = dry_run
+        self.quick_pipeline_cmd = quick_pipeline_cmd or None
+        self.quick_pipeline_timeout = quick_pipeline_timeout
         # Caches populated once at run() start so we don't invoke Maven per vuln.
         self._tree: "maven_ops.TreeAnalysis | None" = None
         self._all_updates: dict[str, str] = {}
@@ -299,13 +303,39 @@ class DeterministicUpdaterAgent(AIAgent):
                 verdict="retry", note=f"apply error: {type(ex).__name__}",
             )
 
-        log.info("    running pipeline: %s (timeout %ds)",
-                 self.pipeline_cmd, self.pipeline_timeout)
+        # Two-stage gate: optional fast pre-flight (compile-only) before the
+        # full pipeline. Catches "doesn't even compile" cases in seconds
+        # instead of after the full test run.
+        if self.quick_pipeline_cmd:
+            log.info("    [stage 1/2] quick pipeline: %s (timeout %ds)",
+                     self.quick_pipeline_cmd, self.quick_pipeline_timeout)
+            quick = pipeline_ops.run_pipeline(
+                self.quick_pipeline_cmd, cwd=self.workdir,
+                timeout=self.quick_pipeline_timeout,
+            )
+            log.info("    [stage 1/2] exit=%d, %.1fs, log=%s",
+                     quick.exit_code, quick.duration_seconds, quick.full_log_path)
+            if quick.exit_code != 0:
+                log.info("    RETRY: quick pipeline failed; rolling back %s",
+                         applied_paths)
+                self._rollback(applied_paths)
+                return AttemptLog(
+                    ga=entry.ga, from_version=entry.vuln_version,
+                    to_version=target_version, strategy=strategy,
+                    pipeline_exit=quick.exit_code,
+                    stderr_excerpt=quick.stderr_tail[-500:],
+                    verdict="retry",
+                    note=f"quick pipeline failed (timed_out={quick.timed_out})",
+                )
+
+        stage_label = "[stage 2/2] " if self.quick_pipeline_cmd else ""
+        log.info("    %srunning pipeline: %s (timeout %ds)",
+                 stage_label, self.pipeline_cmd, self.pipeline_timeout)
         pipeline = pipeline_ops.run_pipeline(
             self.pipeline_cmd, cwd=self.workdir, timeout=self.pipeline_timeout,
         )
-        log.info("    pipeline finished: exit=%d, %.1fs, log=%s",
-                 pipeline.exit_code, pipeline.duration_seconds,
+        log.info("    %spipeline finished: exit=%d, %.1fs, log=%s",
+                 stage_label, pipeline.exit_code, pipeline.duration_seconds,
                  pipeline.full_log_path)
         if pipeline.exit_code != 0:
             log.info("    RETRY: pipeline failed; rolling back %s", applied_paths)

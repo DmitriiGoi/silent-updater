@@ -40,6 +40,21 @@ python3 -m silent_updater.cli run \
     --dry-run
 ```
 
+**Big batches (100+ vulnerabilities) — use the two-stage pipeline.** A fast pre-flight catches "doesn't even compile" cases in seconds instead of after the full test run:
+
+```bash
+python3 -m silent_updater.cli run \
+    --repo-url "file:///Users/you/IdeaProjects/your-java-project" \
+    --quick-pipeline-cmd "mvn -q -DskipTests compile" \
+    --pipeline-cmd "mvn clean verify -DskipITs" \
+    --compliance ./examples/compliance_config.json \
+    --vuln-xlsx ./my_vulns.xlsx \
+    --workdir /tmp/silent-work \
+    --no-llm
+```
+
+Each attempt now goes: `quick → if fail rollback else full → verify → commit`. Most version-breakers die in the 30-second quick stage so you don't pay for a 10-minute full test run on them.
+
 First run **always** with `--dry-run` — it shows the plan without modifying anything. Once happy, drop the flag:
 
 ```bash

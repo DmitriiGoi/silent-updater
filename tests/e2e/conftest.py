@@ -26,8 +26,9 @@ class FakeMavenState:
     pipeline_results: list[pipeline_ops.PipelineResult] = field(default_factory=list)
 
     def pop_pipeline(self) -> pipeline_ops.PipelineResult:
-        if len(self.pipeline_results) == 1:
-            return self.pipeline_results[0]
+        if not self.pipeline_results:
+            raise IndexError("no more pipeline results queued (test scripted "
+                             "fewer than the agent invoked)")
         return self.pipeline_results.pop(0)
 
     def pop_verify(self, ga: str) -> dict:
@@ -72,14 +73,22 @@ def maven_state(monkeypatch) -> FakeMavenState:
     def fake_probe(workdir, ga, version):
         return version in state.available_versions.get(ga, [])
 
+    def _touch_pom(workdir, marker):
+        pom = Path(workdir) / "pom.xml"
+        if pom.exists():
+            pom.write_bytes(pom.read_bytes() + f"\n<!-- {marker} -->\n".encode())
+
     def fake_bump_direct(workdir, ga, version):
         state.apply_calls.append(("bump_direct", ga, version))
+        _touch_pom(workdir, f"bump_direct {ga} -> {version}")
 
     def fake_bump_managed(workdir, ga, version):
         state.apply_calls.append(("bump_managed", ga, version))
+        _touch_pom(workdir, f"bump_managed {ga} -> {version}")
 
     def fake_bump_parent(workdir, ga, version):
         state.apply_calls.append(("bump_parent", ga, version))
+        _touch_pom(workdir, f"bump_parent {ga} -> {version}")
 
     def fake_dm_override(pom_path, ga, version):
         state.apply_calls.append(("dm_override", ga, version))
