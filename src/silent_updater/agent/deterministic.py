@@ -216,6 +216,21 @@ class DeterministicUpdaterAgent(AIAgent):
         log.info("  %d candidate version(s): %s", len(candidates), candidates)
         log.info("  strategy chain: %s", strategies)
 
+        if self.dry_run:
+            log.info("  DRY-RUN: would try the above candidates × strategies. "
+                     "No apply, no pipeline, no commit.")
+            outcome.final_verdict = "skip"
+            outcome.attempts.append(AttemptLog(
+                ga=entry.ga, from_version=entry.vuln_version,
+                to_version=",".join(candidates),
+                strategy=strategies[0] if strategies else None,
+                pipeline_exit=None, stderr_excerpt="",
+                verdict="skip",
+                note=f"dry-run: would try {len(candidates)} candidate(s) "
+                     f"across strategies {strategies}",
+            ))
+            return
+
         budget = self.compliance.max_attempts_per_dep
         attempts_used = 0
         # Parent dep — only needed for exclusion_and_direct strategy
@@ -264,14 +279,8 @@ class DeterministicUpdaterAgent(AIAgent):
         target_version: str,
         parent_ga: str | None,
     ) -> AttemptLog:
-        if self.dry_run:
-            return AttemptLog(
-                ga=entry.ga, from_version=entry.vuln_version,
-                to_version=target_version, strategy=strategy,
-                pipeline_exit=0, stderr_excerpt="",
-                verdict="success", note="dry-run",
-            )
-
+        # dry_run is short-circuited earlier in _process_vuln; if we reach here
+        # we are doing real work.
         applied_paths = [str(root_pom.relative_to(self.workdir)).replace("\\", "/")]
         try:
             log.info("    applying %s on %s", strategy, applied_paths[0])
