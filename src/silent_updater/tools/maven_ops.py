@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from lxml import etree
 
@@ -76,18 +79,40 @@ class TreeAnalysis:
 
 
 def _run_mvn(args: list[str], cwd: Path | str, timeout: int = MVN_TIMEOUT,
-             check: bool = True) -> subprocess.CompletedProcess:
+             check: bool = True):
+    """Run Maven, streaming combined stdout+stderr live to the user's terminal
+    while also capturing it for parsing.
+
+    Streaming makes long invocations (first-time plugin downloads, Nexus
+    queries) visible — without it, the user sees nothing for minutes.
+    """
     cmd = ["mvn", "-B", "-ntp", *args]
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # merge stderr → stdout for ordered output
         text=True,
-        timeout=timeout,
+        bufsize=1,
     )
-    if check and proc.returncode != 0:
-        raise MavenError(cmd, proc.returncode, proc.stdout, proc.stderr)
-    return proc
+    chunks: list[str] = []
+    start = time.monotonic()
+    assert proc.stdout is not None
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            chunks.append(line)
+            if time.monotonic() - start > timeout:
+                proc.kill()
+                raise subprocess.TimeoutExpired(cmd, timeout, output="".join(chunks))
+    finally:
+        proc.stdout.close()
+    returncode = proc.wait()
+    stdout = "".join(chunks)
+    if check and returncode != 0:
+        raise MavenError(cmd, returncode, stdout, "")
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
 
 # ------------------------------ dependency:tree ------------------------------
