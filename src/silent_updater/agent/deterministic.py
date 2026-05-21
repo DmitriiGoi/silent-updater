@@ -91,10 +91,11 @@ class DeterministicUpdaterAgent(AIAgent):
                  self.compliance.max_attempts_per_dep)
 
         if not self.dry_run:
-            log.info("creating branch %s", branch_name)
-            git_ops.create_branch(branch_name, cwd=self.workdir)
+            created = git_ops.create_or_switch_branch(branch_name, cwd=self.workdir)
+            log.info("%s branch %s",
+                     "created" if created else "reusing existing", branch_name)
         else:
-            log.info("dry-run: would create branch %s", branch_name)
+            log.info("dry-run: would create or reuse branch %s", branch_name)
         report.branch = branch_name
 
         root_pom = pom_inspector.find_root_pom(self.workdir)

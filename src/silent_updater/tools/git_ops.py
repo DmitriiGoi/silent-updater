@@ -83,6 +83,39 @@ def create_branch(name: str, cwd: Path | str, base: str | None = None) -> None:
     _run(args, cwd=cwd)
 
 
+def _branch_exists(name: str, cwd: Path | str) -> bool:
+    proc = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"],
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
+def create_or_switch_branch(name: str, cwd: Path | str, base: str | None = None) -> bool:
+    """Idempotent branch setup for repeated runs in the same workdir.
+
+    - If the branch already exists: discard uncommitted changes (safe — we'd
+      have rolled them back anyway on a clean re-run), check it out, return False.
+    - Otherwise: create a new branch from base/HEAD, return True.
+    """
+    # Drop any uncommitted leftovers from a previous interrupted run.
+    proc = subprocess.run(
+        ["git", "stash", "push", "-u", "-m", "silent-updater pre-rerun stash"],
+        cwd=str(cwd) if cwd else None,
+        capture_output=True, text=True,
+    )
+    # ignore stash failure — it's just cleanup
+    if _branch_exists(name, cwd):
+        _run(["checkout", name], cwd=cwd)
+        # Roll back any tracked modifications introduced by previous interrupted attempts.
+        _run(["reset", "--hard", "HEAD"], cwd=cwd)
+        return False
+    create_branch(name, cwd, base=base)
+    return True
+
+
 def status_porcelain(cwd: Path | str) -> str:
     return _run(["status", "--porcelain"], cwd=cwd).stdout
 
