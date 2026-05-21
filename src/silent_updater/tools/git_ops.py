@@ -96,21 +96,18 @@ def _branch_exists(name: str, cwd: Path | str) -> bool:
 def create_or_switch_branch(name: str, cwd: Path | str, base: str | None = None) -> bool:
     """Idempotent branch setup for repeated runs in the same workdir.
 
-    - If the branch already exists: discard uncommitted changes (safe — we'd
-      have rolled them back anyway on a clean re-run), check it out, return False.
-    - Otherwise: create a new branch from base/HEAD, return True.
+    - If the branch already exists: just check it out. Any user-made
+      modifications to the working tree are preserved (per-attempt rollback
+      is targeted and will only touch poms we actually applied changes to).
+    - Otherwise: create a new branch from base/HEAD.
+
+    Returns True if branch was newly created, False if reused.
     """
-    # Drop any uncommitted leftovers from a previous interrupted run.
-    proc = subprocess.run(
-        ["git", "stash", "push", "-u", "-m", "silent-updater pre-rerun stash"],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True, text=True,
-    )
-    # ignore stash failure — it's just cleanup
     if _branch_exists(name, cwd):
+        # If we're already on the branch (interrupted mid-run) the checkout
+        # is a no-op. Otherwise it switches without touching dirty files
+        # unless they conflict — let git surface that case.
         _run(["checkout", name], cwd=cwd)
-        # Roll back any tracked modifications introduced by previous interrupted attempts.
-        _run(["reset", "--hard", "HEAD"], cwd=cwd)
         return False
     create_branch(name, cwd, base=base)
     return True
